@@ -1,0 +1,195 @@
+n = 225
+p = 10
+R = 5
+
+# Simulate coordinates on a grid
+coords = as.matrix(expand.grid(1:sqrt(n),1:sqrt(n))) + matrix(runif(2*n,-.5,.5),n,2)
+
+# Choose centroids using K-means clustering
+fit = kmeans(coords,centers=R)
+centroids.true = fit$centers
+clusters.true = fit$cluster
+
+# Use the true matrix W to choose phi.beta 
+# Set sigma2.beta to make unit diagonal on covariance for beta
+W.true = 1/as.matrix(dist(centroids.true)); diag(W.true) = 0
+L = eigen(W.true)$values
+phi.beta.true = .9*(1/max(L))
+sigma2.beta.true = 1/solve(diag(1,R)-phi.beta.true*W.true)[1,1]
+
+# Specify theta based on true centroids
+theta.true = .85*(-log(1/.95-1)/mean(rowSums(W.true)))
+
+# Simulate Data
+data = Simulate.Data(n=n,p=p,R=R,tau2=rep(.05,R),phi=rep(1e-8,R),g=rep(1,R),
+                     beta.mean=0,sigma2.beta=sigma2.beta.true,phi.beta=phi.beta.true,centroids=centroids.true,var.select=TRUE,theta=theta.true,pj=.5)
+
+# Unpack objects from data
+X.all = data$X.all
+y.all = data$y.all
+beta.true = data$beta
+mu.true = data$mu
+gamma.true = data$gamma
+tau2.true = data$tau2
+g.true = data$g
+phi.true = data$phi
+S.list.true = data$S.list
+S.inv.list.true = data$S.inv.list.true
+theta.true = data$theta
+D = data$D
+K = data$K
+CHs.true = Calc.CHs(coords,clusters.true)
+CH.inds.true = Calc.CH.inds(coords,clusters.true,CHs.true)
+
+# Initialize with truth
+initial.centroids = centroids.true
+clusters.curr = clusters.true
+CHs.curr = CHs.true
+CH.inds.curr = CH.inds.true
+
+# # Initialize with random clusters
+initial.centroids = matrix(randomLHS(R,2),R,2)*(sqrt(n)-1)+1
+clusters.curr = apply(distance(coords,initial.centroids),1,which.min)
+CHs.curr = Calc.CHs(coords,clusters.curr)
+CH.inds.curr = Calc.CH.inds(coords,clusters.curr,CHs.curr)
+
+# Plot true clusters vs. Initial clusters
+par(mfrow=c(2,2))
+
+plot(NA,NA,xlim=c(1,sqrt(n)),ylim=c(1,sqrt(n)),main="True")
+text(coords[,1],coords[,2],labels=1:n,cex=.75,col=c("black","red")[CH.inds.true+1])
+lapply(CHs.true,function(c) polygon(c,lty=2))
+
+plot(NA,NA,xlim=c(1,sqrt(n)),ylim=c(1,sqrt(n)),main="Initial")
+text(coords[,1],coords[,2],labels=1:n,cex=.75,col=c("black","red")[CH.inds.curr+1])
+lapply(CHs.curr,function(c) polygon(c,lty=2))
+
+# Create storage matrices/arrays
+I = 25000
+beta.store = array(NA,c(I,p,R)); beta.store[1,,] = 1
+gamma.store = array(NA,c(I,p,R)); gamma.store[1,,] = rep(1,p)
+theta.store = rep(NA,I); theta.store[1] = 0
+mu.store = matrix(NA,I,R); mu.store[1,] = 1
+tau2.store = matrix(NA,I,R); tau2.store[1,] = rep(1,R)
+phi.store = matrix(NA,I,R); phi.store[1,] = rep(.1,R)
+g.store = matrix(NA,I,R); g.store[1,] = rep(1e-10,R)
+phi.beta.store = rep(NA,I); phi.beta.store[1] = 0
+sigma2.beta.store = rep(NA,I); sigma2.beta.store[1] = 1
+mu.curr = mu.store[1,]
+beta.curr = beta.store[1,,]
+gamma.curr = gamma.store[1,,]
+theta.curr = theta.store[1]
+tau2.curr = tau2.store[1,]
+g.curr = g.store[1,]
+phi.curr = phi.store[1,]
+phi.beta.curr = phi.store[1]
+sigma2.beta.curr = sigma2.beta.store[1]
+W.curr = 1/as.matrix(dist(initial.centroids)); diag(W.curr) = 0
+K.inv.curr = (diag(1,R) - phi.beta.curr*W.curr)/sigma2.beta.curr
+K.curr = solve(K.inv.curr)
+probs = t( (1 + exp(theta.curr*W.curr%*%t((gamma.curr==0)-(gamma.curr==1))))^(-1) )
+
+S.list.curr = list()
+S.inv.list.curr = list()
+
+for(r in 1:R)
+{
+  ind = which(clusters.curr==r)
+  S.list.curr[[r]] = tau2.curr[r]*(exp(-D[ind,ind]/phi.curr[r]) + diag(g.curr[r],length(ind)))
+  S.inv.list.curr[[r]] = solve(S.list.curr[[r]])
+}
+
+# Run MCMC on this bitch
+for(i in 2:I)
+{
+  draw = Sample.phi.beta(mu=mu.curr,beta=beta.curr,gamma=gamma.curr,phi.beta.curr=phi.beta.curr,step=.05,
+                         K.inv.curr=K.inv.curr,W=W.curr,sigma2.beta=sigma2.beta.curr)
+  phi.beta.curr = draw$phi.beta.draw
+  K.inv.curr = draw$K.inv.draw
+  K.curr = solve(K.inv.curr)
+  
+  draw = Sample.sigma2.beta(mu=mu.curr,beta=beta.curr,gamma=gamma.curr,K.inv.curr=K.inv.curr,sigma2.beta.curr=sigma2.beta.curr)
+  sigma2.beta.curr = draw$sigma2.beta.draw
+  K.inv.curr = draw$K.inv.draw
+  K.curr = solve(K.inv.curr)
+  
+  draw = GP.g.Sample(X.all=X.all,y.all=y.all,clusters=clusters.curr,D=D,step=.03,g.UB=2,mu=mu.curr,beta=beta.curr,
+                     phi=phi.curr,tau2=tau2.curr,g.curr=g.curr,S.list.curr=S.list.curr,
+                     S.inv.list.curr=S.inv.list.curr)
+  g.curr = draw$g.draw
+  S.list.curr = draw$S.list.draw
+  S.inv.list.curr = draw$S.inv.list.draw
+
+  draw = GP.Phi.Sample(X.all=X.all,y.all=y.all,clusters=clusters.curr,D=D,step=.03,phi.UB=2,mu=mu.curr,
+                       beta=beta.curr,phi.curr=phi.curr,tau2=tau2.curr,g=g.curr,S.list.curr=S.list.curr,
+                       S.inv.list.curr=S.inv.list.curr)
+  phi.curr = draw$phi.draw
+  S.list.curr = draw$S.list.draw
+  S.inv.list.curr =  draw$S.inv.list.draw
+
+  draw = GP.tau2.Sample(y.all=y.all,X.all=X.all,mu=mu.curr,beta=beta.curr,clusters=clusters.curr,
+                        S.list.curr=S.list.curr,S.inv.list.curr=S.inv.list.curr,tau2.curr=tau2.curr)
+  tau2.curr = draw$tau2.draw
+  S.list.curr = draw$S.list.draw
+  S.inv.list.curr = draw$S.inv.list.draw
+
+  draw = Sample.Mu(y.all=y.all,X.all=X.all,S.inv.list=S.inv.list.curr,K=K.curr,
+                   clusters=clusters.curr,beta=beta.curr,mu.curr=mu.curr)
+  mu.curr = draw
+
+  draw = SSVS.Gibbs(y.all=y.all,X.all=X.all,clusters=clusters.curr,S.inv.list=S.inv.list.curr,K=K.curr,
+                    mu=mu.curr,beta.curr=beta.curr,gamma.curr=gamma.curr,probs=probs)
+  gamma.curr = draw$gamma.draw
+  beta.curr = draw$beta.draw
+
+  draw = Cluster.Assign.CH(X.all=X.all,y.all=y.all,clusters.curr=clusters.curr,beta=beta.curr,mu=mu.curr,
+                           gamma=gamma.curr,S.list=S.list.curr,S.inv.list=S.inv.list.curr,tau2=tau2.curr,g=g.curr,
+                           phi=phi.curr,D=D,coords=coords,CHs.curr=CHs.curr,CH.inds.curr=CH.inds.curr)
+  S.list.curr = draw$S.list.draw
+  S.inv.list.curr = draw$S.inv.list.draw
+  clusters.curr = draw$clusters.draw
+  CHs.curr = draw$CHs.draw
+  CH.inds.curr = draw$CH.inds.draw
+  W.curr = 1/as.matrix(dist(Calc.Centroids(clusters.curr,coords))); diag(W.curr) = 0
+  
+  # UHOH - if my cluster assignments change, W changes, in a way that my current value for phi.beta does not allow!
+  phi.beta.curr = min(.98*(1/max(eigen(W.curr)$values)),phi.beta.curr)
+  K.inv.curr = (diag(1,R) - phi.beta.curr*W.curr)/sigma2.beta.curr
+  K.curr = solve(K.inv.curr)
+  
+  theta.max = -log(1/.99-1)/max(rowSums(W.curr))
+  bound.prob = 1 - .05
+  rate.seq = seq(.Machine$double.eps,10,length=1000)
+  rate.opt = rate.seq[which.min(abs(pgamma(theta.max,shape=1,rate=rate.seq)-bound.prob))]
+  draw = Sample.theta(theta.curr=theta.curr,gamma=gamma.curr,W=W.curr,a=1,b=rate.opt,theta.UB=100,step.size=.08)
+  theta.curr = draw
+  probs = t( (1 + exp(theta.curr*W.curr%*%t((gamma.curr==0)-(gamma.curr==1))))^(-1) )
+  
+  gamma.store[i,,] = gamma.curr
+  beta.store[i,,] = beta.curr
+  mu.store[i,] = mu.curr
+  tau2.store[i,] = tau2.curr
+  phi.store[i,] = phi.curr
+  g.store[i,] = g.curr
+  theta.store[i] = theta.curr
+  phi.beta.store[i] = phi.beta.curr
+  sigma2.beta.store[i] = sigma2.beta.curr
+  
+  if(i%%100==0)
+  {
+    plot(NA,NA,xlim=c(1,sqrt(n)),ylim=c(1,sqrt(n)),main="True")
+    # text(coords[,1],coords[,2],labels=1:n,cex=.75,col=c("black","red")[CH.inds.true+1])
+    lapply(CHs.true,function(c) polygon(c,lty=2))
+    
+    plot(NA,NA,xlim=c(1,sqrt(n)),ylim=c(1,sqrt(n)),main=paste("Iteration",i))
+    # text(coords[,1],coords[,2],labels=1:n,col=c("black","red")[CH.inds.curr+1],cex=.75)
+    lapply(CHs.curr,function(c) polygon(c,lty=2))
+    print(i)
+  }
+}
+
+plot(phi.beta.store,type="l")
+abline(h=phi.beta.true,col="chartreuse")
+plot(theta.store,type="l")
+abline(h=theta.true,col="chartreuse")
+hist(theta.store[1:2500])
